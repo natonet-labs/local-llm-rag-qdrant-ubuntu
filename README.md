@@ -309,19 +309,22 @@ This environment is externally managed
 
 Then, install full Python tooling and recreate the venv.
 ```bash
-# 1. Back in your project
+# 1. Install full Python tool
+sudo apt install python3-full
+
+# 2. Back in your project
 cd ~/projects/local-llm-with-rag
 
-# 2. Remove the old venv
+# 3. Remove the old venv
 rm -rf venv
 
-# 3. Recreate venv with the fully featured Python
+# 4. Recreate venv with the fully featured Python
 python3 -m venv venv
 
-# 4. Activate it
+# 5. Activate it
 source venv/bin/activate
 
-# 5. Now install packages inside the venv
+# 6. Now install packages inside the venv
 python3 -m pip install --upgrade pip setuptools wheel
 python3 -m pip install ollama qdrant-client
 ```
