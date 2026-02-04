@@ -165,136 +165,219 @@ python test_rag.py
 
 Expected response time: 10-30 seconds depending on hardware.
 
-## Step 7: Basic RAG Example
+## Step 7: Dynamic OER Ingestion (PositivePsychology.com RSS)
 
-Create a simple RAG script:
+This step adds **daily, dynamic ingestion** of Open Educational Resources (OER) from PositivePsychology.com into your local Qdrant RAG corpus. The script:
+
+- Polls the RSS feed.
+- Extracts article metadata and text.
+- Embeds each article via Ollama (`nomic-embed-text`).
+- Upserts embeddings + payloads into your Qdrant collection.
+
+### 7.1 Install RSS / parsing dependencies
+
+From inside your Ubuntu project venv:
+
 ```bash
-nano simple_rag.py
-```
-
-Paste this content:
-```python
-import ollama
-from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct
-import uuid
-
-# Initialize clients
-qdrant = QdrantClient("localhost", port=6333)
-collection_name = "documents"
-
-# Create collection if it doesn't exist
-try:
-    qdrant.create_collection(
-        collection_name=collection_name,
-        vectors_config=VectorParams(size=768, distance=Distance.COSINE),
-    )
-    print(f"✓ Created collection: {collection_name}")
-except Exception as e:
-    if "already exists" in str(e):
-        print(f"✓ Collection {collection_name} already exists")
-    else:
-        print(f"Collection error: {e}")
-
-# Sample document
-document = "The capital of France is Paris. It is known for the Eiffel Tower."
-
-# Generate embedding
-print("Generating embedding...")
-embedding_response = ollama.embeddings(model='nomic-embed-text', prompt=document)
-embedding = embedding_response['embedding']
-
-# Store in Qdrant
-point_id = str(uuid.uuid4())
-qdrant.upsert(
-    collection_name=collection_name,
-    points=[
-        PointStruct(
-            id=point_id,
-            vector=embedding,
-            payload={"text": document}
-        )
-    ]
-)
-print(f"✓ Stored document with ID: {point_id}")
-
-# Query the document
-query = "What is the capital of France?"
-print(f"\nQuery: {query}")
-
-# Generate query embedding
-query_embedding_response = ollama.embeddings(model='nomic-embed-text', prompt=query)
-query_embedding = query_embedding_response['embedding']
-
-# Search Qdrant
-hits = qdrant.query_points(
-    collection_name=collection_name,
-    query=query_embedding,
-    limit=1
-)
-search_results = [hit.payload for hit in hits.points] if hits.points else []
-
-# Get context from search results
-context = search_results[0]['text'] if search_results else ""
-
-# Generate response with context
-print("Generating response...")
-chat_response = ollama.chat(
-    model='gemma2:2b',
-    messages=[
-        {
-            'role': 'user',
-            'content': f'Context: {context}\n\nQuestion: {query}\n\nAnswer based on the context:'
-        }
-    ]
-)
-
-print(f"\n✓ Response: {chat_response['message']['content']}")
-```
-
-Run it:
-```bash
-python simple_rag.py
-```
-
-## Project Structure
-
-```
-/home/$USER/rag-project/
-├── venv/                    # Virtual environment
-├── test_rag.py             # Connection test script
-├── simple_rag.py           # Basic RAG example
-└── documents/              # Store your documents here (create as needed)
-```
-
-## Working with the Environment
-
-**Activate environment:**
-```bash
-cd /home/$USER/rag-project
+cd ~/projects/local-llm-rag-qdrant-ubuntu
 source venv/bin/activate
+
+pip install feedparser beautifulsoup4 requests trafilatura
 ```
 
-**Deactivate when done:**
+### 7.2 OER ingestion script
+
+Create a new file `oer_ingest.py` in your project:
+
+```python
+import feedparser
+import requests
+import trafilatura
+import hashlib
+import uuid
+from datetime import datetime
+from time import mktime
+import re
+
+from qdrant_client import QdrantClient
+from qdrant_client.http import models
+import ollama
+
+QDRANT_HOST = "localhost"
+QDRANT_PORT = 6333
+COLLECTION_NAME = "psych_oer"
+
+# PositivePsychology.com RSS (wellbeing / psychology OER) [rss.feedspot](https://rss.feedspot.com/positive_psychology_rss_feeds/)
+RSS_URL = "https://positivepsychology.com/feed/"
+
+client = QdrantClient(QDRANT_HOST, port=QDRANT_PORT)
+
+def ensure_collection():
+    if not client.collection_exists(COLLECTION_NAME):
+        client.create_collection(
+            collection_name=COLLECTION_NAME,
+            vectors_config=models.VectorParams(
+                size=768,  # nomic-embed-text output dimension [ollama](https://ollama.com/library/nomic-embed-text)
+                distance=models.Distance.COSINE,
+            ),
+        )
+        print(f"Created collection '{COLLECTION_NAME}'")
+    else:
+        print(f"Collection '{COLLECTION_NAME}' already exists")
+
+def clean_html(text: str) -> str:
+    text = text or ""
+    text = re.sub(r"<[^>]+>", "", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+def fetch_full_text(url: str) -> str:
+    """
+    Try to fetch and extract the main article content.
+    Falls back to RSS summary if needed.
+    """
+    try:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        downloaded = trafilatura.extract(resp.text)
+        if downloaded and len(downloaded) > 200:
+            return downloaded
+    except Exception:
+        pass
+    return ""
+
+def embed_text(text: str):
+    resp = ollama.embeddings(model="nomic-embed-text", prompt=text)
+    return resp["embedding"]
+
+def ingest_rss(limit: int = 10):
+    ensure_collection()
+
+    feed = feedparser.parse(RSS_URL)
+    points = []
+
+    for entry in feed.entries[:limit]:
+        title = entry.title
+        url = entry.link
+
+        pub_struct = entry.get("published_parsed")
+        if pub_struct:
+            published = datetime.fromtimestamp(mktime(pub_struct))
+        else:
+            published = datetime.now()
+
+        summary = clean_html(getattr(entry, "summary", ""))
+        full_text = fetch_full_text(url) or f"{title}. {summary}"
+
+        # Truncate to avoid huge prompts
+        full_text = full_text[:6000]
+
+        # Skip trivial content
+        if len(full_text) < 200:
+            print(f"Skipping very short article: {title}")
+            continue
+
+        # Deterministic ID per article
+        doc_hash = hashlib.md5(f"{url}{published}".encode()).digest()
+        point_id = str(uuid.UUID(bytes=doc_hash))
+
+        # Embedding for whole article (for now; you can later chunk)
+        vector = embed_text(full_text)
+
+        payload = {
+            "doc_id": url,
+            "title": title,
+            "url": url,
+            "published": published.isoformat(),
+            "source": "positivepsychology",
+            "text": full_text,
+            "tags": ["wellbeing", "positive_psychology"],
+        }
+
+        points.append(
+            models.PointStruct(
+                id=point_id,
+                vector=vector,
+                payload=payload,
+            )
+        )
+
+        print(f"Queued: {title[:80]}...")
+
+    if points:
+        client.upsert(collection_name=COLLECTION_NAME, points=points)
+        print(f"✅ Upserted {len(points)} OER articles into '{COLLECTION_NAME}'")
+    else:
+        print("No new articles to ingest.")
+
+if __name__ == "__main__":
+    ingest_rss(limit=10)
+```
+
+Notes:
+
+- Uses `collection_exists` and `VectorParams(size=768)` to match `nomic-embed-text`.[web:6][web:17][web:30]
+- Uses full-text extraction via **trafilatura** where possible.[web:226]
+- Uses deterministic UUIDs so re-running doesn’t create duplicates.
+
+### 7.3 Integrating into your RAG chatbot
+
+In your existing `rag_chat.py` (Ubuntu + Qdrant version), add a **second retrieval path** for `psych_oer` or point your existing retrieval at that collection.
+
+Example retrieval for the new collection:
+
+```python
+from qdrant_client import QdrantClient
+from qdrant_client.http import models
+import ollama
+
+QDRANT_HOST = "localhost"
+QDRANT_PORT = 6333
+COLLECTION_NAME = "psych_oer"
+EMB_MODEL = "nomic-embed-text"
+
+client = QdrantClient(QDRANT_HOST, port=QDRANT_PORT)
+
+def retrieve_psych_context(query: str, top_k: int = 5) -> str:
+    q_emb = ollama.embeddings(model=EMB_MODEL, prompt=query)["embedding"]
+
+    results = client.query_points(
+        collection_name=COLLECTION_NAME,
+        query=q_emb,
+        limit=top_k,
+        with_payload=True,
+    ).points
+
+    context = "Psychology OER context:\n\n"
+    for i, hit in enumerate(results, 1):
+        p = hit.payload
+        context += f"[{i}] {p.get('title','')} ({p.get('source','')}, {p.get('published','')[:10]})\n"
+        context += f"{p.get('text','')[:800]}...\n\n"
+    return context
+```
+
+Then in your chat loop, you can either:
+
+- Use *only* this context, or  
+- Concatenate it with your existing local-docs context before sending to the LLM.
+
+### 7.4 Automating daily ingestion
+
+Add a cron job on Ubuntu so new OER articles are ingested daily:
+
 ```bash
-deactivate
+crontab -e
 ```
 
-## Verify Services are Running
+Add:
 
-```bash
-# Check Ollama
-systemctl status ollama
-
-# Check Qdrant
-docker ps | grep qdrant
-
-# Test Ollama API
-curl http://localhost:11434/api/tags
-
-# Test Qdrant API
-curl http://localhost:6333/collections
+```cron
+0 3 * * * cd /home/youruser/projects/local-llm-rag-qdrant-ubuntu && /home/youruser/.pyenv/shims/python oer_ingest.py >> logs/oer_ingest.log 2>&1
 ```
+
+(adjust paths for your environment / venv activation, e.g. `source venv/bin/activate && python oer_ingest.py`.)
+
+---
 
 ## Troubleshooting
 
