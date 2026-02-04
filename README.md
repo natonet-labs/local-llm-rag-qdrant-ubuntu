@@ -294,6 +294,34 @@ curl http://localhost:6333/collections
 
 ## Troubleshooting
 
+### Error: externally-managed-environment
+If you still see the "externally-managed-environment" error inside the venv, for example:
+```text:
+This environment is externally managed
+╰─> To install Python packages system-wide, try apt install
+    python3-xyz, where xyz is the package you are trying to
+    install.
+```
+
+Then, install full Python tooling and recreate the venv.
+```bash
+# 1. Back in your project
+cd ~/projects/local-llm-with-rag
+
+# 2. Remove the old venv
+rm -rf venv
+
+# 3. Recreate venv with the fully featured Python
+python3 -m venv venv
+
+# 4. Activate it
+source venv/bin/activate
+
+# 5. Now install packages inside the venv
+python3 -m pip install --upgrade pip setuptools wheel
+python3 -m pip install ollama qdrant-client
+```
+
 ### Slow responses
 - Expected on older hardware (2012 iMac: 20-40 seconds per query)
 - Use `gemma2:2b` instead of larger models
