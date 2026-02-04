@@ -402,13 +402,13 @@ sudo apt install python3-full
 cd ~/projects/local-llm-with-rag
 
 # 4. Remove the old venv
-rm -rf venv
+rm -rf .venv
 
 # 5. Recreate venv with the fully featured Python
-python3 -m venv venv
+python3 -m venv .venv
 
 # 6. Activate it
-source venv/bin/activate
+source .venv/bin/activate
 
 # 7. Now install packages inside the venv
 python3 -m pip install --upgrade pip setuptools wheel
