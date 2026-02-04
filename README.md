@@ -191,7 +191,10 @@ try:
     )
     print(f"✓ Created collection: {collection_name}")
 except Exception as e:
-    print(f"Collection already exists or error: {e}")
+    if "already exists" in str(e):
+        print(f"✓ Collection {collection_name} already exists")
+    else:
+        print(f"Collection error: {e}")
 
 # Sample document
 document = "The capital of France is Paris. It is known for the Eiffel Tower."
@@ -224,14 +227,15 @@ query_embedding_response = ollama.embeddings(model='nomic-embed-text', prompt=qu
 query_embedding = query_embedding_response['embedding']
 
 # Search Qdrant
-search_results = qdrant.search(
+hits = qdrant.query_points(
     collection_name=collection_name,
-    query_vector=query_embedding,
+    query=query_embedding,
     limit=1
 )
+search_results = [hit.payload for hit in hits.points] if hits.points else []
 
 # Get context from search results
-context = search_results.payload['text'] if search_results else ""
+context = search_results[0]['text'] if search_results else ""
 
 # Generate response with context
 print("Generating response...")
